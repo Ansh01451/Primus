@@ -6,4 +6,5 @@
 /pyvenv.cfg
 .env
 .venv
-
+*.pyc
+venv/
