@@ -1,0 +1,91 @@
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime
+from fastapi import FastAPI
+from auth.middleware import JWTMiddleware
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from fastapi.middleware.cors import CORSMiddleware
+from auth.routes import router as auth_router
+from dynamics.routes import router as dyn_router
+from admin.routes import router as admin_router
+from client.routes import router as client_router
+from vendor.routes import router as vendor_router
+from publications.routes import router as primus_router
+from publications.services import load_data  # for scheduler prewarm/refresh
+from notifications.routes import router as notifications_router
+from surveys.routes import router as surveys_router
+from utils.activity_middleware import ActivityLoggerMiddleware
+
+from admin.routes import AdminService
+
+scheduler = AsyncIOScheduler()
+
+
+async def _cron_fetch_unregistered():
+    """
+    Runs at midnight to sync unregistered clients from Dynamics.
+    """
+    # You could store last run timestamp in DB or cache
+    # For now, fetch *all* new since yesterday midnight
+    since = datetime.combine(datetime.now().date(), datetime.min.time())
+    raw = await AdminService.fetch_dynamics_clients(since)
+    AdminService.save_unregistered(raw)
+    print(f"[Cron] Fetched and saved {len(raw)} unregistered clients")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Schedule your cron job at 00:00 UTC
+    scheduler.add_job(
+        lambda: asyncio.create_task(_cron_fetch_unregistered()),
+        trigger="cron", hour=0, minute=0
+    )
+
+    # NEW: refresh Primus In-News cache every 30 minutes
+    scheduler.add_job(
+        lambda: asyncio.create_task(load_data(force=True)),
+        trigger="interval", minutes=30
+    )
+ 
+    # Optional: prewarm cache at startup to avoid cold start on first request
+    try:
+        await load_data(force=True)
+        print("[Startup] Primus In-News cache warmed")
+    except Exception as e:
+        print(f"[Startup] Primus In-News prewarm failed: {e}")
+
+    scheduler.start()
+    print("[Lifespan] Scheduler started")
+
+    yield  # <-- App runs during this period
+
+    scheduler.shutdown()
+    print("[Lifespan] Scheduler shut down")
+
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(ActivityLoggerMiddleware)
+
+# ✅ Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",  # your Vite/React frontend
+        "http://localhost:5174",  # your Vite/React frontend
+        "https://nkqlvm7w-8000.inc1.devtunnels.ms",  # backend tunnel (if frontend calls this)
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+app.add_middleware(JWTMiddleware)
+app.include_router(auth_router)
+app.include_router(dyn_router)
+app.include_router(admin_router)
+app.include_router(client_router)
+app.include_router(vendor_router)
+app.include_router(primus_router)
+app.include_router(notifications_router)
+app.include_router(surveys_router)
+# app.include_router(alumni_router)
