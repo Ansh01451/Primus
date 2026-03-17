@@ -13,10 +13,10 @@ class FeedbackIn(BaseModel):
     category: str            # use FeedbackCategory.value from frontend or backend
     team_member_id: Optional[str] = None
     milestone_name: Optional[str] = None
-    communication_quality: Optional[int] = Field(None, ge=1, le=5)
-    team_collaboration: Optional[int] = Field(None, ge=1, le=5)
-    solution_quality: Optional[int] = Field(None, ge=1, le=5)
-    overall_satisfaction: Optional[int] = Field(None, ge=1, le=5)
+    communication_quality: Optional[int] = Field(None, ge=0, le=5)
+    team_collaboration: Optional[int] = Field(None, ge=0, le=5)
+    solution_quality: Optional[int] = Field(None, ge=0, le=5)
+    overall_satisfaction: Optional[int] = Field(None, ge=0, le=5)
     comments: Optional[str] = None
     
 
@@ -35,7 +35,7 @@ class FeedbackDB(BaseModel):
     solution_quality: Optional[int] = None
     overall_satisfaction: Optional[int] = None
     comments: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.now())
+    created_at: datetime = Field(default_factory=datetime.now)
     feedback_attachments_experience_letter: Optional[List[Dict[str, str]]] = Field(default_factory=list)
     feedback_attachments_appreciation_letter: Optional[List[Dict[str, str]]] = Field(default_factory=list)
     feedback_attachments_completion_certificate: Optional[List[Dict[str, str]]] = Field(default_factory=list)
@@ -53,9 +53,9 @@ class FeedbackUpdate(BaseModel):
     project_name: Optional[str] = None
     category: Optional[str] = None
     team_member_id: Optional[str] = None
-    communication_quality: Optional[int] = Field(None, ge=1, le=5)
-    team_collaboration: Optional[int] = Field(None, ge=1, le=5)
-    solution_quality: Optional[int] = Field(None, ge=1, le=5)
-    overall_satisfaction: Optional[int] = Field(None, ge=1, le=5)
+    communication_quality: Optional[int] = Field(None, ge=0, le=5)
+    team_collaboration: Optional[int] = Field(None, ge=0, le=5)
+    solution_quality: Optional[int] = Field(None, ge=0, le=5)
+    overall_satisfaction: Optional[int] = Field(None, ge=0, le=5)
     comments: Optional[str] = None
 

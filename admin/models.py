@@ -148,18 +148,3 @@ class CreateAlertRequest(BaseModel):
 class UpdateEscalationStatusRequest(BaseModel):
     status: str
 
-# ── Activity Logging ──────────────────────────────────────────────────────────
-
-class ActivityLog(BaseModel):
-    user_id:      Optional[str] = None
-    user_email:   Optional[str] = None
-    user_role:    Optional[str] = None
-    action:       str
-    method:       str
-    path:         str
-    module:       str
-    status_code:  int
-    timestamp:    datetime = Field(default_factory=datetime.utcnow)
-    ip_address:   Optional[str] = None
-    user_agent:   Optional[str] = None
-

@@ -25,26 +25,18 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 
 # Login
 @router.post("/login", status_code=202)
-async def login(data: LoginDTO, request: Request):
-    # Set email in request state so middleware can log who tried to login
-    request.state.user_email = data.email
-    request.state.user_type = data.type
-    
+async def login(data: LoginDTO):
     await verify_captcha(data.captcha_token)
     await AuthService.login(data)
-    print(f"Login request received for: {data.email}")
+    print("Login request received for:")
     return {"message": "OTP sent to email"}
 
 
 @router.post("/login/verify", response_model=LoginResponseDTO)
-async def verify_login(data: VerifyOtpDTO, response: Response, request: Request):
-    # Set email in request state for logging
-    request.state.user_email = data.email
-    request.state.user_type = data.type
-    
+async def verify_login(data: VerifyOtpDTO, response: Response):
     tokens = AuthService.verify_login(data)
     response.set_cookie("refreshToken", tokens["refresh_token"], httponly=True, secure=True, samesite="none", path="/")
-    print(f"Login verified for: {data.email}")
+    print("Login verified for:")
     return LoginResponseDTO(access_token=tokens["access_token"],
                             vendor_type=tokens["vendor_type"],
                             vendor_name=tokens["vendor_name"])

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from auth.middleware import get_current_user, require_roles
 from auth.roles import Role
 from admin.models import OnboardUserRequest, UpdateUserProfileRequest, CreateContentRequest, UpdateContentRequest, CreateAlertRequest, UpdateEscalationStatusRequest
-from admin.services import AdminService, ContentService, AlertService, SupportService, LogService
+from admin.services import AdminService, ContentService, AlertService, SupportService
 
 from utils.blob_utils import upload_blob_from_file
 
@@ -287,13 +287,19 @@ def update_escalation_status(role: str, escalation_id: str, payload: UpdateEscal
 
 
 
-
-# ── Activity Log ─────────────────────────────────────────────────────────────
-
-@router.get("/activity-logs", summary="List all activity logs", status_code=status.HTTP_200_OK)
-async def list_activity_logs(
-    page: int = Query(1, ge=1),
-    size: int = Query(50, ge=1, le=200),
-    role: Optional[str] = Query(None, description="Filter by role")
+@router.get("/feedback", summary="List all feedback (vendor & client)", status_code=status.HTTP_200_OK)
+def list_feedback(
+    page:   int = Query(1, ge=1),
+    size:   int = Query(20, ge=1, le=100),
+    role:   Optional[str] = Query(None, description="Filter by role: vendor | client"),
+    search: Optional[str] = Query(None, description="Search by comments or tracking_id"),
 ):
-    return LogService.list_logs(page, size, role)
+    return SupportService.list_feedback(page, size, role, search)
+
+
+@router.get("/feedback/{role}/{feedback_id}", summary="Get single feedback details", status_code=status.HTTP_200_OK)
+def get_feedback(role: str, feedback_id: str):
+    if role not in ("vendor", "client"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    return SupportService.get_feedback(role, feedback_id)
+

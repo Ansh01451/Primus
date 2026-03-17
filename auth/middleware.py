@@ -1,3 +1,4 @@
+from datetime import datetime
 from utils.log import logger
 from typing import Dict, List
 from fastapi import Depends, HTTPException, Request, status
@@ -14,18 +15,18 @@ jwt_service = JWTService()
 
 class JWTMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        print(f"--- [DEBUG] JWTMiddleware processing {request.method} {request.url.path} ---")
         try:
-            creds: HTTPAuthorizationCredentials = await bearer(request)
-            if creds:
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
                 try:
-                    payload = jwt_service.verify_access_token(creds.credentials)
+                    token = auth_header.split(" ")[1]
+                    payload = jwt_service.verify_access_token(token)
                     request.state.user_id = payload.get("sub")
                     request.state.roles = payload.get("roles", [])
                     request.state.user_type = payload.get("type")
-                    request.state.user_email = payload.get("email")
                     logger.debug(f"Authenticated request from user_id={request.state.user_id}")
                 except FastAPIHTTPException as e:
-                    # Let HTTPExceptions pass through untouched
                     logger.warning(f"Token verification failed: {e.detail}")
                     return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
                 except Exception as e:
@@ -34,12 +35,32 @@ class JWTMiddleware(BaseHTTPMiddleware):
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                         content={"detail": "Error verifying access token"}
                     )
-            return await call_next(request)
         except Exception as e:
-            logger.critical(f"Unhandled middleware exception: {e}")
+            import traceback
+            logger.critical(f"Auth Logic Exception: {e}\n{traceback.format_exc()}")
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"detail": "Internal server error in authentication middleware"}
+                content={"detail": "Internal error in authentication logic"}
+            )
+
+        # Now call next outside the auth catch-all
+        try:
+            return await call_next(request)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"!!! ROUTE CRASH DETECTED !!!\n{tb}")
+            logger.critical(f"ROUTE CRASH: {e}\n{tb}")
+            # Also write to a file for easy retrieval
+            try:
+                with open("crash_traceback.log", "a") as f:
+                    f.write(f"\n--- CRASH AT {datetime.now()} ---\n{tb}\n")
+            except Exception as log_err:
+                print(f"Failed to write to crash_traceback.log: {log_err}")
+
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"detail": "Internal Server Error (Captured by Middleware)"}
             )
 
 
@@ -70,13 +91,9 @@ async def get_current_user(req: Request, creds=Depends(bearer)) -> Dict:
 def require_roles(*allowed_roles: str):
     def dependency(payload=Depends(get_current_user)):
         try:
-            # Normalize user roles to lowercase strings
-            user_roles: List[str] = [str(r).lower() for r in payload.get("roles", [])]
-            # Normalize allowed roles to lowercase strings
-            allowed_roles_str = [(r.value if hasattr(r, 'value') else str(r)).lower() for r in allowed_roles]
-            
-            if not any(r in user_roles for r in allowed_roles_str):
-                logger.warning(f"User {payload.get('email')} lacks required roles: {allowed_roles_str}, has roles: {user_roles}")
+            roles: List[str] = payload.get("roles", [])
+            if not any(r in roles for r in allowed_roles):
+                logger.warning(f"User lacks required roles: {allowed_roles}, has roles: {roles}")
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient privileges")
         except HTTPException:
             raise

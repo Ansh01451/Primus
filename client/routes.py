@@ -1,11 +1,11 @@
 from io import BytesIO
 import logging
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile, Form, status
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Annotated
 from datetime import datetime
 
 from pydantic import BaseModel, EmailStr
-from .dashboard.services import fetch_client_projects_by_email, get_project_dashboard_details, TeamMemberOut, fetch_project_team_members, get_document_attachments_for_project, get_attachment_and_stream
+from .dashboard.services import fetch_client_projects_by_email, get_project_dashboard_details, TeamMemberOut, fetch_project_team_members, get_document_attachments_for_project, get_attachment_and_stream, get_attachment_preview_url
 from .escalations.services import EscalationService
 from .escalations.models import EscalationIn, EscalationOut
 from .dashboard.models import DashboardOverview, ProjectDetailsOut
@@ -31,7 +31,9 @@ router = APIRouter(
     dependencies=[Depends(require_roles(Role.CLIENT))]
 )
 
-
+# Include sub-routers
+from .profile.routes import profile_router
+router.include_router(profile_router)
 
 ############################# ESCALATIONS #############################
 
@@ -89,24 +91,19 @@ BACKEND_TO_FRONTEND_TYPE_FEEDBACK = {v: k for k, v in FRONTEND_TO_BACKEND_TYPE_F
 )
 async def create_escalation(
     project_id: str = Form(...),
-    type: str = Form(...),
-    urgency: str = Form(...),
+    escalation_type: EscalationType = Form(..., alias="type"),
+    urgency: Urgency = Form(...),
     subject: str = Form(...),
     description: str = Form(...),
     execution_date: Optional[datetime] = Form(None),
-    files: List[UploadFile] = File([]),
+    files: Annotated[List[UploadFile], File()] = [],
     user: dict = Depends(get_current_user)
 ):
     print("User in escalation endpoint:", user)
     print("Files received at API:", files)
-
-     # Convert frontend label -> backend enum value
-    normalized_type = FRONTEND_TO_BACKEND_TYPE_ESCALATION.get(type)
-    if not normalized_type:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported escalation type: {type}"
-        )
+    
+    # Use enum value directly for service logic
+    normalized_type = escalation_type.value
     
     # Convert UploadFiles to (filename, BytesIO) tuples
     file_contents = []
@@ -141,8 +138,26 @@ async def list_client_escalations(
     project_no: str,
     user: dict = Depends(get_current_user)
 ):
+    # Derive email from user token if not provided (though list route doesn't have it as param)
+    user_email = user.get("email")
     return await EscalationService.list_escalations_for_client(
         user, project_no, BACKEND_TO_FRONTEND_TYPE_ESCALATION
+    )
+
+@router.get(
+    "/escalations",
+    response_model=List[EscalationOut],
+    summary="List all escalations for the current client across all projects",
+    dependencies=[Depends(require_roles(Role.CLIENT))]
+)
+async def list_all_client_escalations(
+    user: dict = Depends(get_current_user)
+):
+    """
+    Returns all escalations created by the authenticated client.
+    """
+    return await EscalationService.list_escalations_for_client(
+        user, None, BACKEND_TO_FRONTEND_TYPE_ESCALATION
     )
 
 @router.patch(
@@ -219,7 +234,7 @@ async def post_feedback(
     client_email: Optional[str] = Form(None),
     project_no: str = Form(...),
     project_name: str = Form(...),
-    category: str = Form(...),
+    category: FeedbackCategory = Form(...),
     team_member_id: Optional[str] = Form(None),
     milestone_name: Optional[str] = Form(None),
     communication_quality: Optional[int] = Form(None),
@@ -227,9 +242,9 @@ async def post_feedback(
     solution_quality: Optional[int] = Form(None),
     overall_satisfaction: Optional[int] = Form(None),
     comments: Optional[str] = Form(None),
-    feedback_attachments_experience_letter: List[UploadFile] = File([]),        # NEW
-    feedback_attachments_appreciation_letter: List[UploadFile] = File([]),     # NEW
-    feedback_attachments_completion_certificate: List[UploadFile] = File([]),  # NEW
+    feedback_attachments_experience_letter: Annotated[List[UploadFile], File()] = [],        # NEW
+    feedback_attachments_appreciation_letter: Annotated[List[UploadFile], File()] = [],     # NEW
+    feedback_attachments_completion_certificate: Annotated[List[UploadFile], File()] = [],  # NEW
     user: dict = Depends(get_current_user)    # keep for auth / deriving client email
 ):
     """
@@ -242,13 +257,8 @@ async def post_feedback(
     })
 
     print("1")
-    # Convert frontend label -> backend enum value
-    normalized_type = FRONTEND_TO_BACKEND_TYPE_FEEDBACK.get(category)
-    if not normalized_type:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported escalation type: {type}"
-        )
+    # Use enum value directly for service logic
+    normalized_type = category.value
 
     # Convert UploadFiles to (filename, BytesIO, AttachmentCategory) tuples and validate
     file_contents: List[Tuple[str, BytesIO, AttachmentCategory]] = []
@@ -274,10 +284,15 @@ async def post_feedback(
     # ✅ Include milestone_name only if milestone feedback
     milestone_name_value = milestone_name if normalized_type == FeedbackCategory.MILESTONE_FEEDBACK.value else None
 
+    # ✅ Derive client_email from user token if missing
+    effective_email = client_email or user.get("email")
+    if not effective_email:
+        raise HTTPException(status_code=400, detail="Client email is required (missing in form and token)")
+
     print("3")  
     # construct FeedbackIn (same fields as your Pydantic model)
     feedback_payload = FeedbackIn(
-        client_email=client_email,
+        client_email=effective_email,
         project_no=project_no,
         project_name=project_name,
         category=FeedbackCategory(normalized_type),
@@ -363,6 +378,14 @@ async def download_project_attachment_content(payload: FileRequest):
     Stream the attachment content back to the client.
     """
     return await get_attachment_and_stream(payload.file_name)
+
+
+@router.post("/project/{project_no}/document-attachments/preview")
+async def preview_project_attachment(payload: FileRequest):
+    """
+    Get a preview URL for the attachment.
+    """
+    return await get_attachment_preview_url(payload.file_name)
 
 
 

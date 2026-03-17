@@ -28,17 +28,39 @@ async def get_access_token() -> str:
         "scope": settings.scope
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, data=payload, headers=headers)
-
-    if resp.status_code != 200:
-        logger.error("Failed to fetch access token from Azure AD: %s", resp.text)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to obtain access token")
-    token = resp.json().get("access_token")
-    if not token:
-        logger.error("No access_token in token response: %s", resp.text)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid token response")
-    return token
+    
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, data=payload, headers=headers)
+            
+            if resp.status_code != 200:
+                logger.error("Failed to fetch access token from Azure AD (Status %s): %s", resp.status_code, resp.text)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to obtain access token from Microsoft")
+            
+            token = resp.json().get("access_token")
+            if not token:
+                logger.error("No access_token in token response: %s", resp.text)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid token response from Microsoft")
+            
+            return token
+            
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            if attempt < max_retries - 1:
+                logger.warning("Connection error on attempt %d for access token: %s. Retrying...", attempt + 1, e)
+                await asyncio.sleep(1)
+                continue
+            logger.error("DNS/Connection failure to %s: %s", url, e)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, 
+                detail=f"Network error: Unable to reach Microsoft login service. Please check internet/DNS. ({type(e).__name__})"
+            )
+        except Exception as e:
+            logger.error("Unexpected error in get_access_token: %s", e)
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal error fetching access token: {str(e)}")
 
 
 # --- Generic dynamics fetch (returns list of items) ---
@@ -82,7 +104,7 @@ async def fetch_dynamics(api_name: str, token: str, filter_expr: Optional[str] =
             values = data.get("value", [])
             results.extend(values)
 
-            # check if there’s another page
+            # check if there's another page
             url = data.get("@odata.nextLink")
 
     return results
@@ -102,17 +124,39 @@ async def get_onedrive_access_token() -> str:
         "scope": settings.onedrive_scope
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, data=payload, headers=headers)
+    
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, data=payload, headers=headers)
+    
+            if resp.status_code != 200:
+                logger.error("Failed to fetch OneDrive access token from Azure AD (Status %s): %s", resp.status_code, resp.text)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to obtain OneDrive access token")
+            
+            token = resp.json().get("access_token")
+            if not token:
+                logger.error("No access_token in OneDrive token response: %s", resp.text)
+                raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid OneDrive token response")
+            
+            return token
 
-    if resp.status_code != 200:
-        logger.error("Failed to fetch access token from Azure AD: %s", resp.text)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to obtain access token")
-    token = resp.json().get("access_token")
-    if not token:
-        logger.error("No access_token in token response: %s", resp.text)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid token response")
-    return token
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            if attempt < max_retries - 1:
+                logger.warning("Connection error on attempt %d for OneDrive token: %s. Retrying...", attempt + 1, e)
+                await asyncio.sleep(1)
+                continue
+            logger.error("DNS/Connection failure to %s: %s", url, e)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY, 
+                detail=f"Network error: Unable to reach Microsoft login service for OneDrive. Please check internet/DNS. ({type(e).__name__})"
+            )
+        except Exception as e:
+            logger.error("Unexpected error in get_onedrive_access_token: %s", e)
+            if isinstance(e, HTTPException):
+                raise e
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal error fetching OneDrive access token: {str(e)}")
 
 
 async def fetch_onedrive_file_content_by_name(one_drive_user: str, file_name: str, graph_token: Optional[str] = None) -> httpx.Response:
@@ -197,6 +241,98 @@ async def fetch_onedrive_file_content_by_name(one_drive_user: str, file_name: st
 
         # for any other status, surface a 502
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Failed to fetch file from OneDrive (status {resp.status_code})")
+
+
+async def get_onedrive_preview_url(one_drive_user: str, file_name: str, graph_token: Optional[str] = None) -> str:
+    """
+    Generate a preview/sharing URL for a OneDrive file.
+    Uses Graph's createLink API to get a 'view' link.
+    """
+    if graph_token is None:
+        graph_token = await get_onedrive_access_token()
+
+    encoded_name = quote(file_name, safe="")
+    headers = {
+        "Authorization": f"Bearer {graph_token}",
+        "Accept": "application/json",
+        "User-Agent": "Primus-Service/1.0",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # 1) Try path-based metadata fetch first (root:/Test/{file})
+        path_url = f"https://graph.microsoft.com/v1.0/users/{one_drive_user}/drive/root:/Test/{encoded_name}"
+        item_id = None
+        try:
+            path_resp = await client.get(path_url, headers=headers)
+            if path_resp.status_code == 200:
+                item_id = path_resp.json().get("id")
+                logger.info("Found item ID via path for preview: %s", item_id)
+        except Exception:
+            pass # fallback to search
+
+        # 2) Fallback to search across user's drive if path failed
+        if not item_id:
+            logger.info("Path lookup failed for %s, falling back to search", file_name)
+            search_url = f"https://graph.microsoft.com/v1.0/users/{one_drive_user}/drive/root/search(q='{file_name}')"
+            try:
+                search_resp = await client.get(search_url, headers=headers)
+                if search_resp.status_code == 200:
+                    items = search_resp.json().get("value", [])
+                    if items:
+                        # prefer exact name match
+                        chosen = None
+                        for it in items:
+                            if it.get("name", "").lower() == file_name.lower():
+                                chosen = it
+                                break
+                        if not chosen:
+                            chosen = items[0]
+                        item_id = chosen.get("id")
+                        logger.info("Found item ID via search for preview: %s", item_id)
+                else:
+                    logger.error("OneDrive search for preview failed (status %s): %s", search_resp.status_code, search_resp.text)
+            except Exception as e:
+                logger.exception("HTTP error when searching OneDrive for preview link %s: %s", file_name, e)
+
+        if not item_id:
+            raise HTTPException(status_code=404, detail=f"File not found on OneDrive for preview: {file_name}")
+
+        # 3) Create sharing link
+        create_link_url = f"https://graph.microsoft.com/v1.0/users/{one_drive_user}/drive/items/{item_id}/createLink"
+        payload = {
+            "type": "view",
+            "scope": "anonymous"
+        }
+        
+        try:
+            link_resp = await client.post(create_link_url, headers=headers, json=payload)
+            # If anonymous fails (e.g., disabled by admin), try organization
+            if link_resp.status_code in (400, 403):
+                logger.warning("Anonymous preview link failed (Admin may restricted). Trying organization scope.")
+                payload["scope"] = "organization"
+                link_resp = await client.post(create_link_url, headers=headers, json=payload)
+
+        except Exception as e:
+            logger.exception("HTTP error when creating OneDrive preview link for %s: %s", file_name, e)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Network error creating sharing link")
+
+        if link_resp.status_code not in (200, 201):
+            logger.error("OneDrive createLink failed (status %s): %s", link_resp.status_code, link_resp.text)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to create preview link on OneDrive. Verify permissions.")
+
+        link_data = link_resp.json()
+        web_url = link_data.get("link", {}).get("webUrl")
+        
+        if not web_url:
+            logger.error("No webUrl in createLink response: %s", link_resp.text)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Invalid sharing link response from Microsoft")
+
+        # Return both the link and the item metadata (useful for logging/details)
+        return {
+            "preview_url": web_url,
+            "item_id": item_id,
+            "drive_item": path_resp.json() if 'path_resp' in locals() and path_resp.status_code == 200 else (chosen if 'chosen' in locals() else {})
+        }
 
 
 # small helper to safely get resp.text without crashing on binary responses

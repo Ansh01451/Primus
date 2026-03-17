@@ -18,8 +18,8 @@ feedback_col = db.get_collection("client_feedback")
 
 class PyObjectId(ObjectId):
     @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
+    def __get_pydantic_core_schema__(cls, _source_type, _handler: GetCoreSchemaHandler):
+        return core_schema.no_info_after_validator_function(cls.validate, core_schema.str_schema())
 
     @classmethod
     def validate(cls, v):

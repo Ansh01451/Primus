@@ -101,38 +101,3 @@ class InvoiceItemsResponse(BaseModel):
     items: List[InvoiceLineItem]
 
 
-
-class VendorInvoiceCreate(BaseModel):
-    vendor_email: EmailStr
-    vendor_name: str
-    invoice_id: str
-    product_or_service: str
-    quantity: float
-    due_date: str
-    unit_price: float
-    discount: float = 0.0
-    amount: float
-    inc_tax: float = 0.0
-    proposal_interest_statement: Optional[str] = None
-
-class VendorInvoiceSubmitted(BaseModel):
-    id: str = Field(..., alias="_id")
-    tracking_id: str
-    vendor_email: EmailStr
-    vendor_name: str
-    invoice_id: str
-    product_or_service: str
-    quantity: float
-    due_date: str
-    unit_price: float
-    discount: float
-    amount: float
-    inc_tax: float
-    proposal_interest_statement: Optional[str]
-    invoice_pdf_url: Optional[str]
-    submitted_at: datetime
-    status: str = "submitted" # submitted, approved, rejected, etc.
-
-    class Config:
-        populate_by_name = True
-        json_encoders = {datetime: lambda dt: dt.isoformat()}

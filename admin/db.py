@@ -61,14 +61,9 @@ onboarded_col_sync = sync_db.get_collection("onboarded_users")         # legacy/
 content_col_sync   = sync_db.get_collection("admin_content")           # sync
 notifications_col_sync = sync_db.get_collection("admin_notifications")  # sync
 alert_logs_col_sync    = sync_db.get_collection("admin_alert_logs")      # sync
-surveys_col_sync       = sync_db.get_collection("admin_surveys")           # sync
-survey_responses_col_sync = sync_db.get_collection("admin_survey_responses") # sync
 
 content_col        = async_db.get_collection("admin_content")          # async
 notifications_col  = async_db.get_collection("admin_notifications")    # async
-activity_logs_col  = async_db.get_collection("activity_logs")          # async
-surveys_col        = async_db.get_collection("admin_surveys")           # async
-survey_responses_col = async_db.get_collection("admin_survey_responses") # async
 
 # Escalation collections (sync)
 vendor_escalations_col_sync = sync_db.get_collection("vendor_escalations")
@@ -77,9 +72,6 @@ client_escalations_col_sync = sync_db.get_collection("client_escalations")
 # Feedback collections (sync)
 vendor_feedback_col_sync = sync_db.get_collection("vendor_feedback")
 client_feedback_col_sync = sync_db.get_collection("client_feedback")
-activity_logs_col_sync = sync_db.get_collection("activity_logs")       # sync
-surveys_col_sync        = sync_db.get_collection("admin_surveys")           # sync
-survey_responses_col_sync = sync_db.get_collection("admin_survey_responses") # sync
 
 
 

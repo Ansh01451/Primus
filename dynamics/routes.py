@@ -12,7 +12,7 @@ from auth.roles import Role
 router = APIRouter(
     prefix="/dynamics", 
     tags=["Dynamics"],
-    dependencies=[Depends(require_roles(Role.CLIENT, Role.ADMIN, Role.VENDOR, Role.ALUMNI, Role.ADVISOR))])
+    dependencies=[Depends(require_roles(Role.CLIENT, Role.ADMIN, Role.VENDOR))])
 
 
 class MeetingListRequest(BaseModel):
@@ -83,22 +83,10 @@ class CancelMeetingRequest(BaseModel):
 
 
 @router.post("/meetings")
-def list_and_save_weekly_meetings(payload: MeetingListRequest, user: dict = Depends(get_current_user)):
+def list_and_save_weekly_meetings(payload: MeetingListRequest):
     """
     API route to return user's Teams meetings for this week or month.
     """
-    # Authorization check
-    email = (user.get("email") or "").lower()
-    req_email = (payload.user_email or "").lower()
-    
-    print(f"Dynamics Meeting Auth check: user_email='{email}', payload_user_email='{req_email}'")
-
-    if email != req_email and "admin" not in user.get("roles", []):
-         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"User not Authorised to access meetings for {req_email}"
-        )
-
     try:
         meetings = fetch_user_meetings(user_email=payload.user_email, scope=payload.scope)
     except ValueError as ve:
@@ -115,21 +103,10 @@ def list_and_save_weekly_meetings(payload: MeetingListRequest, user: dict = Depe
  
  
 @router.post("/schedule-meeting")
-def schedule_user_meeting(payload: ScheduleMeetingRequest, user: dict = Depends(get_current_user)):
+def schedule_user_meeting(payload: ScheduleMeetingRequest):
     """
     API route to schedule a Teams meeting with a client.
     """
-    email = (user.get("email") or "").lower()
-    req_email = (payload.organizer_email or "").lower()
-    
-    print(f"Dynamics Schedule Auth check: user_email='{email}', payload_organizer_email='{req_email}'")
-
-    if email != req_email and "admin" not in user.get("roles", []):
-         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"User not Authorised to schedule meetings for {req_email}"
-        )
-
     try:
         meeting = schedule_meeting(
             payload.organizer_email,
@@ -141,7 +118,7 @@ def schedule_user_meeting(payload: ScheduleMeetingRequest, user: dict = Depends(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-  
+ 
     return {
         "organizer": payload.organizer_email,
         "client": payload.client_emails,
@@ -152,26 +129,20 @@ def schedule_user_meeting(payload: ScheduleMeetingRequest, user: dict = Depends(
         "meetingId": meeting.get("id"),
     }
  
- 
+
 @router.post("/cancel-meeting")
-def cancel_user_meeting(payload: CancelMeetingRequest, user: dict = Depends(get_current_user)):
+def cancel_user_meeting(payload: CancelMeetingRequest):
     """
     API route to cancel a scheduled Teams meeting.
     """
-    email = (user.get("email") or "").lower()
-    req_email = (payload.organizer_email or "").lower()
-    
-    print(f"Dynamics Cancel Auth check: user_email='{email}', payload_organizer_email='{req_email}'")
-
-    if email != req_email and "admin" not in user.get("roles", []):
-         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"User not Authorised to cancel meetings for {req_email}"
-        )
-
     try:
         result = cancel_meeting(payload.organizer_email, payload.meeting_id, payload.message)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-  
+ 
     return result
+
+
+
+
+

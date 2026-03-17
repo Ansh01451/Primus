@@ -1,5 +1,6 @@
 # projects/services.py
 import asyncio
+import io
 import logging
 from typing import List, Dict, Any, Optional
 import mimetypes
@@ -11,7 +12,7 @@ from .db import registered_clients_col
 from .models import ProjectSummary, ProjectDetailsOut, DashboardOverview
 from .enums import TaskPriority
 from datetime import datetime
-from dynamics.services import get_access_token, fetch_dynamics, get_onedrive_access_token, fetch_onedrive_file_content_by_name
+from dynamics.services import get_access_token, fetch_dynamics, get_onedrive_access_token, fetch_onedrive_file_content_by_name, get_onedrive_preview_url
 
 logger = logging.getLogger("projects.service")
 handler = logging.StreamHandler()
@@ -590,5 +591,105 @@ async def get_attachment_and_stream(file_name: str) -> StreamingResponse:
     return StreamingResponse(iter_bytes(), media_type=content_type, headers={
         "Content-Disposition": f'attachment; filename="{download_name}"'
     })
+
+
+async def get_attachment_preview_url(file_name: str) -> Dict[str, Any]:
+    """
+    Get a preview URL for the specified OneDrive file + metadata + backend content log.
+    """
+    one_drive_user = settings.onedrive_user_email
+    graph_token = await get_onedrive_access_token()
+    
+    # 1) Get preview link and drive metadata
+    preview_data = await get_onedrive_preview_url(one_drive_user, file_name, graph_token=graph_token)
+    preview_url = preview_data.get("preview_url")
+    drive_item = preview_data.get("drive_item", {})
+
+    # 2) Log document content in the backend console (as requested by user)
+    print(f"\n================ [BACKEND DOCUMENT PREVIEW LOG] ================")
+    print(f"FILE NAME      : {file_name}")
+    print(f"ONEDRIVE ID    : {preview_data.get('item_id')}")
+    print(f"SIZE           : {drive_item.get('size', 'Unknown')} bytes")
+    print(f"MIME TYPE      : {drive_item.get('file', {}).get('mimeType', 'Unknown')}")
+    print(f"PREVIEW URL    : {preview_url}")
+    
+    content_preview = ""
+    try:
+        # Fetch actual bytes for a content check
+        resp = await fetch_onedrive_file_content_by_name(one_drive_user, file_name, graph_token=graph_token)
+        content_bytes = await resp.aread()
+        
+        mime = drive_item.get('file', {}).get('mimeType', '').lower()
+        if any(t in mime for t in ["text", "json", "csv", "javascript", "xml", "plain"]):
+            snippet = content_bytes.decode(errors='ignore')
+            content_preview = snippet
+            print(f"--- [CONTENT (TEXT)] ---")
+            print(snippet)
+            print(f"--------------------------------")
+        elif "pdf" in mime:
+            print(f"--- [CONTENT EXTRACT (PDF)] ---")
+            try:
+                import pypdf
+                pdf_reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+                num_pages = len(pdf_reader.pages)
+                print(f"Total Pages: {num_pages}")
+                # Extract all pages text
+                pdf_text = ""
+                for i in range(num_pages):
+                    page_text = pdf_reader.pages[i].extract_text() or ""
+                    pdf_text += f"[Page {i+1}]:\n{page_text}\n\n"
+                
+                content_preview = pdf_text
+                print(pdf_text)
+            except Exception as pe:
+                content_preview = f"PDF extraction failed: {pe}"
+                print(f"PDF extraction failed: {pe}. Basic Header: {content_bytes[:8].decode(errors='ignore')}")
+            print(f"-------------------------------")
+        elif "spreadsheet" in mime or "excel" in mime or "officedocument.spreadsheetml" in mime:
+            print(f"--- [CONTENT EXTRACT (EXCEL)] ---")
+            try:
+                import pandas as pd
+                # Read first sheet, ALL rows
+                df = pd.read_excel(io.BytesIO(content_bytes))
+                content_preview = df.to_string(index=False)
+                print(content_preview)
+            except Exception as ee:
+                content_preview = f"Excel extraction failed: {ee}"
+                print(f"Excel extraction failed: {ee}. Binary size: {len(content_bytes)} bytes.")
+            print(f"---------------------------------")
+        else:
+            content_preview = f"Binary file ({len(content_bytes)} bytes). Preview not supported for this type."
+            print(f"STATUS         : Binary file content retrieved ({len(content_bytes)} bytes). Previewing internal content skipped for this type.")
+    except Exception as e:
+        content_preview = f"Content logging failed: {e}"
+        print(f"STATUS         : Content logging failed: {e}")
+    
+    # 3) Try to fetch Dynamics metadata by parsing ID from filename
+    details = {}
+    try:
+        # Format usually: <RawName>_<ID>_<No>.<Ext>
+        base_name = file_name.rsplit(".", 1)[0]
+        parts = base_name.split("_")
+        if len(parts) >= 2:
+            # Try the last part or second to last as ID
+            file_id = parts[-2] if len(parts) >= 3 else parts[-1] 
+            if file_id.isdigit():
+                dyn_token = await get_access_token()
+                items = await fetch_dynamics("documentAttachmentApiPage", dyn_token, f"id eq {file_id}")
+                if items:
+                    details = items[0]
+                    print(f"--- [DYNAMICS METADATA] ---")
+                    print(f"Document Type  : {details.get('documentType')}")
+                    print(f"Table ID       : {details.get('tableID')}")
+                    print(f"Attached Date  : {details.get('attachedDate')}")
+                    print(f"---------------------------")
+    except Exception as e:
+        logger.warning("Failed to fetch Dynamics metadata for preview: %s", e)
+
+    print(f"===============================================================\n")
+
+    return {
+        "content": content_preview
+    }
 
 

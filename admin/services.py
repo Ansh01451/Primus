@@ -1,5 +1,4 @@
 from datetime import datetime
-from dynamics.services import get_access_token, fetch_dynamics
 import secrets
 import string
 from typing import Dict, List, Optional
@@ -14,14 +13,12 @@ from admin.db import (
     content_col_sync, notifications_col_sync, alert_logs_col_sync,
     collection_map_async, collection_map_sync,
     vendor_escalations_col_sync, client_escalations_col_sync,
-    vendor_feedback_col_sync, client_feedback_col_sync,
-    activity_logs_col, activity_logs_col_sync
+    vendor_feedback_col_sync, client_feedback_col_sync
 )
 
 from admin.models import (
     UnregisteredClient, RegisteredClient, OnboardUserRequest, OnboardedUser,
     UpdateUserProfileRequest, CreateContentRequest, UpdateContentRequest, CreateAlertRequest,
-    ActivityLog
 )
 from auth.db import email_field_map, name_field_map
 from utils.templates import client_details_template, onboarded_user_template, admin_reset_password_template
@@ -172,26 +169,13 @@ class AdminService:
         return col
 
     @staticmethod
-    async def fetch_dynamics_user(dynamics_id: str, role: Optional[str] = None) -> Dict:
+    async def fetch_dynamics_user(dynamics_id: str) -> Dict:
         """
         Fetch a single user record from Dynamics by their ID.
         Returns an empty dict if the record is not found (non-blocking).
         """
-        if not dynamics_id or dynamics_id == "—":
-            return {}
-
+        url = f"{settings.dynamics_api}/{dynamics_id}"
         try:
-            # If role is vendor, use Business Central vendors API
-            if role == "vendor":
-                token = await get_access_token()
-                filter_expr = f"number eq '{dynamics_id}'"
-                items = await fetch_dynamics("vendors", token, filter_expr)
-                if items:
-                    return items[0]
-                return {}
-
-            # Default to legacy behavior (likely CRM contacts)
-            url = f"{settings.dynamics_api.rstrip('/')}/{dynamics_id}"
             async with httpx.AsyncClient(timeout=10.0) as c:
                 resp = await c.get(url)
             if resp.status_code == 200:
@@ -426,31 +410,16 @@ class AdminService:
         """Enrich user profile from their role-specific collection with Dynamics data."""
         doc, col, role = AdminService._find_user_and_col(user_id)
 
+
         doc["_id"] = str(doc["_id"])
-        
-        # Determine dynamics_id (handle different field names)
-        dyn_id = doc.get("dynamics_id") or doc.get(f"{role}_id") or doc.get(f"{role}_no") or ""
 
         # Fetch live data from Dynamics (non-fatal)
-        dyn = await AdminService.fetch_dynamics_user(dyn_id, role=role)
+        dyn = await AdminService.fetch_dynamics_user(doc.get("dynamics_id", ""))
 
         # Helper: prefer Dynamics value, then DB field, then default
-        def d(dyn_keys, db_keys=None, default="—"):
-            if isinstance(dyn_keys, str): dyn_keys = [dyn_keys]
-            if isinstance(db_keys, str): db_keys = [db_keys]
-            
-            # 1. Try Dynamics
-            for dk in dyn_keys:
-                val = dyn.get(dk)
-                if val: return val
-            
-            # 2. Try DB
-            if db_keys:
-                for dbk in db_keys:
-                    val = doc.get(dbk)
-                    if val: return val
-                    
-            return default
+        def d(dyn_key, db_key=None, default="—"):
+            v = dyn.get(dyn_key) or (doc.get(db_key) if db_key else None)
+            return v if v else default
 
         # Sub-doc helper: merge stored mongo sub-doc with Dynamics
         def sub(mongo_key, field):
@@ -459,38 +428,37 @@ class AdminService:
 
         profile = {
             "user_id":      doc["_id"],
-            "dynamics_id":  dyn_id or "—",
-            "role":         role,
+            "dynamics_id":  doc.get("dynamics_id", "—"),
+            "role":         doc.get("role", "—"),
             "is_active":    doc.get("is_active", True),
             "onboarded_at": str(doc.get("created_at", "—")),
 
-            # Mapped names for Dynamics BC (displayName) and DB (vendor_name, etc)
-            "name":  d(["displayName", "name"], ["name", f"{role}_name"]),
-            "email": d(["email", "emailaddress1"], ["email", f"{role}_email"]),
-            "phone": d(["phoneNumber", "telephone1"], ["phone"]),
+            "name":  d("name",          "name"),
+            "email": d("emailaddress1", "email"),
+            "phone": d("telephone1",    "phone"),
 
             "address": {
-                "line1":   d("addressLine1", "address.line1"),
-                "line2":   d("addressLine2", "address.line2"),
-                "city":    d("city", "address.city"),
-                "state":   d("state", "address.state"),
-                "pincode": d("postalCode", "address.pincode"),
-                "country": d("country", "address.country", default="India"),
+                "line1":   dyn.get("address1_line1")   or sub("address", "line1")   or "—",
+                "line2":   dyn.get("address1_line2")   or sub("address", "line2")   or "—",
+                "city":    dyn.get("address1_city")    or sub("address", "city")    or "—",
+                "state":   dyn.get("address1_stateorprovince") or sub("address", "state") or "—",
+                "pincode": dyn.get("address1_postalcode") or sub("address", "pincode") or "—",
+                "country": dyn.get("address1_country") or sub("address", "country") or "India",
             },
 
             "bank_info": {
-                "bank_name":      sub("bank_info", "bank_name") or "—",
-                "account_number": sub("bank_info", "account_number") or "—",
-                "ifsc_code":      sub("bank_info", "ifsc_code") or "—",
-                "account_holder": sub("bank_info", "account_holder") or "—",
-                "account_type":   sub("bank_info", "account_type") or "—",
+                "bank_name":      dyn.get("bank_name")           or sub("bank_info", "bank_name")      or "—",
+                "account_number": dyn.get("account_number")      or sub("bank_info", "account_number") or "—",
+                "ifsc_code":      dyn.get("ifsc_code")           or sub("bank_info", "ifsc_code")      or "—",
+                "account_holder": dyn.get("account_holder_name") or sub("bank_info", "account_holder") or "—",
+                "account_type":   dyn.get("account_type")        or sub("bank_info", "account_type")   or "—",
             },
 
             "gst": {
-                "gstin":      sub("gst", "gstin") or "—",
-                "pan":        sub("gst", "pan") or "—",
-                "trade_name": sub("gst", "trade_name") or "—",
-                "gst_status": sub("gst", "gst_status") or "—",
+                "gstin":      dyn.get("gst_number")  or sub("gst", "gstin")      or "—",
+                "pan":        dyn.get("pan_number")  or sub("gst", "pan")        or "—",
+                "trade_name": dyn.get("trade_name")  or sub("gst", "trade_name") or "—",
+                "gst_status": dyn.get("gst_status")  or sub("gst", "gst_status") or "—",
             },
         }
         return profile
@@ -501,61 +469,61 @@ class AdminService:
         """Updates user profile in their respected collection and mirrors to Dynamics."""
         doc, col, role = AdminService._find_user_and_col(user_id)
 
+
         mongo_set: dict = {}   # dotted keys for $set
         dyn_updates: dict = {} # Dynamics API payload
-
-        # Determine dynamics_id
-        dyn_id = doc.get("dynamics_id") or doc.get(f"{role}_id") or doc.get(f"{role}_no") or ""
-
-        # Dyn field mapping based on role
-        if role == "vendor":
-            dyn_map = {
-                "name": "displayName",
-                "email": "email",
-                "phone": "phoneNumber",
-                "line1": "addressLine1", "line2": "addressLine2",
-                "city": "city", "state": "state",
-                "pincode": "postalCode", "country": "country"
-            }
-        else:
-            dyn_map = {
-                "name": "name", "email": "emailaddress1", "phone": "telephone1",
-                "line1": "address1_line1", "line2": "address1_line2",
-                "city": "address1_city", "state": "address1_stateorprovince",
-                "pincode": "address1_postalcode", "country": "address1_country"
-            }
 
         # ── Personal
         if data.name is not None:
             mongo_set["name"] = data.name
-            mongo_set[f"{role}_name"] = data.name
-            dyn_updates[dyn_map["name"]] = data.name
+            dyn_updates["name"] = data.name
         if data.email is not None:
-            email_str = str(data.email)
-            mongo_set["email"] = email_str
-            mongo_set[f"{role}_email"] = email_str
-            dyn_updates[dyn_map["email"]] = email_str
+            mongo_set["email"] = str(data.email)
+            dyn_updates["emailaddress1"] = str(data.email)
         if data.phone is not None:
             mongo_set["phone"] = data.phone
-            dyn_updates[dyn_map["phone"]] = data.phone
+            dyn_updates["telephone1"] = data.phone
 
         # ── Address
         if data.address:
-            ad = data.address.dict(exclude_unset=True)
-            for k, v in ad.items():
+            for k, v in data.address.dict(exclude_unset=True).items():
                 mongo_set[f"address.{k}"] = v
-                if k in dyn_map:
-                    dyn_updates[dyn_map[k]] = v
+            ad = data.address.dict(exclude_unset=True)
+            dyn_map = {
+                "line1": "address1_line1", "line2": "address1_line2",
+                "city": "address1_city", "state": "address1_stateorprovince",
+                "pincode": "address1_postalcode", "country": "address1_country",
+            }
+            for k, dk in dyn_map.items():
+                if k in ad:
+                    dyn_updates[dk] = ad[k]
 
-        # ── Bank Info (Mongo only currently for BC Vendors)
+        # ── Bank Info
         if data.bank_info:
             for k, v in data.bank_info.dict(exclude_unset=True).items():
                 mongo_set[f"bank_info.{k}"] = v
+            bnk = data.bank_info.dict(exclude_unset=True)
+            dyn_bank_map = {
+                "bank_name": "bank_name", "account_number": "account_number",
+                "ifsc_code": "ifsc_code", "account_holder": "account_holder_name",
+                "account_type": "account_type",
+            }
+            for k, dk in dyn_bank_map.items():
+                if k in bnk:
+                    dyn_updates[dk] = bnk[k]
 
-        # ── GST (Mongo only currently for BC Vendors)
+        # ── GST
         if data.gst:
             for k, v in data.gst.dict(exclude_unset=True).items():
                 mongo_set[f"gst.{k}"] = v
+            gst = data.gst.dict(exclude_unset=True)
+            dyn_gst_map = {
+                "gstin": "gst_number", "pan": "pan_number",
+                "trade_name": "trade_name", "gst_status": "gst_status",
+            }
+            for k, dk in dyn_gst_map.items():
+                if k in gst:
+                    dyn_updates[dk] = gst[k]
 
         if not mongo_set:
             return {"user_id": user_id, "message": "No fields provided to update"}
@@ -564,41 +532,17 @@ class AdminService:
         col.update_one({"_id": doc["_id"]}, {"$set": mongo_set})
 
         # 2. Mirror to Dynamics (non-fatal, best-effort)
-        if dyn_updates and dyn_id:
-            await AdminService.update_dynamics_user(dyn_id, dyn_updates, role=role)
+        dynamics_id = doc.get("dynamics_id", "")
+        if dyn_updates and dynamics_id:
+            await AdminService.update_dynamics_user(dynamics_id, dyn_updates)
 
         return {"user_id": user_id, "role": role, "message": "Profile updated successfully"}
 
     @staticmethod
-    async def update_dynamics_user(dynamics_id: str, updates: dict, role: Optional[str] = None):
+    async def update_dynamics_user(dynamics_id: str, updates: dict):
         """Helper to PATCH data back to Dynamics 365."""
-        if not dynamics_id or dynamics_id == "—":
-            return
-
+        url = f"{settings.dynamics_api}/{dynamics_id}"
         try:
-            if role == "vendor":
-                # For Business Central, we might need the internal 'id' (GUID) to PATCH.
-                # If dynamics_id is just 'number' (e.g. 10000), we need to fetch the record first
-                # to get its @odata.etag or technical 'id' if the API requires it.
-                # However, many BC APIs allow patching by 'number' if it's the key.
-                # Let's try direct number patch first.
-                token = await get_access_token()
-                # BC Endpoint for specific vendor: vendors(number='10000')
-                # fetch_dynamics usually handles collections. For a specific patch:
-                url = f"{settings.dynamics_api}vendors(number='{dynamics_id}')"
-                headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "If-Match": "*" # Standard for BC patch
-                }
-                async with httpx.AsyncClient(timeout=10.0) as c:
-                    resp = await c.patch(url, json=updates, headers=headers)
-                if resp.status_code not in (200, 204):
-                    print(f"BC Vendor update failed: {resp.status_code} - {resp.text}")
-                return
-
-            # Legacy behavior
-            url = f"{settings.dynamics_api.rstrip('/')}/{dynamics_id}"
             async with httpx.AsyncClient(timeout=10.0) as c:
                 resp = await c.patch(url, json=updates)
             if resp.status_code not in (200, 204):
@@ -786,21 +730,10 @@ class ContentService:
             oid = BsonObjectId(content_id)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid content ID")
-
-        # 1. Delete the content item
         result = content_col_sync.delete_one({"_id": oid})
         if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Content not found")
-
-        # 2. Synchronously delete all associated notifications (cleanup)
-        try:
-            notifications_col_sync.delete_many({"content_id": content_id})
-        except Exception as e:
-            # We don't want to fail the whole delete if notification cleanup fails, 
-            # but we should log it or print it.
-            print(f"Failed to cleanup notifications for deleted content {content_id}: {e}")
-
-        return {"content_id": content_id, "message": "Deleted successfully and notifications cleared"}
+        return {"content_id": content_id, "message": "Deleted successfully"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -919,30 +852,11 @@ class AlertService:
         email_count  = 0
         email_errors = []
 
-        # 2. Write log first to get an ID for linking
-        log_doc = {
-            "title":            payload.title,
-            "message":          payload.message,
-            "target_roles":     payload.target_roles,
-            "user_ids":         payload.user_ids,
-            "named_recipients": [
-                {"name": u.get("name", ""), "email": u.get("email", ""), "role": u.get("role", "")}
-                for u in users
-            ],
-            "channel":          payload.channel,
-            "sent_by":          admin_email,
-            "recipient_count":  len(users),
-            "sent_at":          now,
-        }
-        result = alert_logs_col_sync.insert_one(log_doc)
-        log_id = str(result.inserted_id)
-
-        # 3. In-app notifications (linked by alert_id)
+        # 2. In-app notifications
         if payload.channel in ("in_app", "both"):
             notif_docs = [{
                 "user_id":      str(u["_id"]),
-                "content_id":   None,
-                "alert_id":     log_id,         # Link back to the log
+                "content_id":   None,          # direct alert, no content page
                 "alert_type":   "admin_alert",
                 "title":        payload.title,
                 "message":      payload.message,
@@ -952,7 +866,7 @@ class AlertService:
             notifications_col_sync.insert_many(notif_docs)
             in_app_count = len(notif_docs)
 
-        # 4. Emails
+        # 3. Emails (best-effort per user)
         if payload.channel in ("email", "both"):
             from utils.email_utils import send_mail_to_user
             for u in users:
@@ -972,18 +886,30 @@ class AlertService:
                 except Exception as e:
                     email_errors.append({"email": u["email"], "error": str(e)})
 
-        # 5. Update log with final counts
-        alert_logs_col_sync.update_one(
-            {"_id": result.inserted_id},
-            {"$set": {
-                "in_app_count": in_app_count,
-                "email_count":  email_count,
-                "email_errors": email_errors,
-            }}
-        )
+        # 4. Write log
+        log_doc = {
+            "title":            payload.title,
+            "message":          payload.message,
+            "target_roles":     payload.target_roles,
+            "user_ids":         payload.user_ids,
+            # Store a name+email snapshot of the actual recipients for audit
+            "named_recipients": [
+                {"name": u.get("name", ""), "email": u.get("email", ""), "role": u.get("role", "")}
+                for u in users
+            ],
+            "channel":          payload.channel,
+            "sent_by":          admin_email,
+            "recipient_count":  len(users),
+            "in_app_count":     in_app_count,
+            "email_count":      email_count,
+            "email_errors":     email_errors,
+            "sent_at":          now,
+        }
+        result = alert_logs_col_sync.insert_one(log_doc)
+        log_doc["_id"] = str(result.inserted_id)
 
         return {
-            "log_id":        log_id,
+            "log_id":        log_doc["_id"],
             "sent_in_app":   in_app_count,
             "sent_email":    email_count,
             "total_recipients": len(users),
@@ -1006,31 +932,10 @@ class AlertService:
             oid = BsonObjectId(log_id)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid log ID")
-
-        # Fetch log first to get metadata for cleanup
-        log = alert_logs_col_sync.find_one({"_id": oid})
-        if not log:
+        result = alert_logs_col_sync.delete_one({"_id": oid})
+        if result.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Log not found")
-
-        # 1. Delete the log itself
-        alert_logs_col_sync.delete_one({"_id": oid})
-
-        # 2. Cleanup notifications
-        try:
-            # Try to delete by alert_id (for new logs)
-            res = notifications_col_sync.delete_many({"alert_id": log_id})
-            
-            # If nothing was deleted by alert_id, try fallback for legacy logs (title + message match)
-            if res.deleted_count == 0:
-                notifications_col_sync.delete_many({
-                    "alert_type": "admin_alert",
-                    "title": log.get("title"),
-                    "message": log.get("message")
-                })
-        except Exception as e:
-            print(f"Failed to cleanup notifications for alert {log_id}: {e}")
-
-        return {"log_id": log_id, "message": "Deleted successfully and notifications cleared"}
+        return {"log_id": log_id, "message": "Deleted"}
 
 
 class SupportService:
@@ -1114,104 +1019,56 @@ class SupportService:
         
         return {"message": "Status updated successfully", "status": status}
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Activity Logging Service
-# ─────────────────────────────────────────────────────────────────────────────
-
-class LogService:
-    @staticmethod
-    def get_action_description(method: str, path: str) -> str:
-        """Maps API paths/methods to friendly descriptions."""
-        # Normalize path
-        p = path.lower()
-        
-        # Auth Mappings
-        if "/auth/login" in p:
-            if "/verify" in p: return "User Login Verification"
-            if "/resend-otp" in p: return "Login OTP Resend"
-            return "Portal Login Attempt"
-        if "/auth/forgot-password" in p: return "Forgot Password Request"
-        if "/auth/reset-password" in p: return "Password Reset"
-        if "/auth/refresh" in p: return "Session Token Refresh"
-        
-        # Admin Mappings
-        if "/admin/" in p:
-            if "fetch-unregistered" in p: return "Syncing Dynamics Clients"
-            if "list-unregistered" in p: return "Viewing Unregistered Clients"
-            if "list-registered" in p: return "Viewing Registered Clients"
-            if "onboard-user" in p: return "Onboarding New User"
-            if "onboarded-users" in p:
-                if "toggle-status" in p: return "Toggling User Status"
-                if "reset-password" in p: return "Admin Resetting User Password"
-                if "profile" in p: return "Managing User Profile"
-                return "Viewing Onboarded Users"
-            if "content" in p:
-                if "/upload-attachment" in p: return "Uploading Content File"
-                if method == "POST": return "Creating New Content"
-                if method == "PATCH": return "Updating Content"
-                if method == "DELETE": return "Deleting Content"
-                return "Viewing Content List"
-            if "alerts" in p:
-                if "send" in p: return "Sending System Alert"
-                if "logs" in p: return "Viewing Alert History"
-            if "escalations" in p:
-                if "status" in p: return "Updating Escalation Status"
-                return "Viewing Support Escalations"
-            if "activity-logs" in p: return "Viewing System Audit Logs"
-            
-        # Survey Mappings
-        if "/surveys" in p:
-            if "/admin" in p:
-                if "/create" in p: return "Creating New Survey"
-                if "/responses" in p: return "Viewing Survey Responses"
-                if method == "DELETE": return "Deleting Survey"
-                return "Listing All Surveys (Admin)"
-            if "/submit" in p: return "Submitting Survey Response"
-            if "/list" in p: return "Viewing Available Surveys"
-            return f"Survey Action: {method}"
-
-        # Notification Fallback
-        if "/notifications" in p: return "Checking Notifications"
-
-        # If it's still a raw route string (contains / and starts with method)
-        return f"{method} {path}"
 
     @staticmethod
-    def _serialize(doc: dict) -> dict:
-        doc["_id"] = str(doc["_id"])
-        
-        # If action looks like a route (legacy logs), beautify it on the fly
-        method = doc.get("method", "GET")
-        path = doc.get("path", "")
-        action = doc.get("action", "")
-        
-        # If action matches fallback pattern, try to re-map it
-        if " /" in action:
-            doc["action"] = LogService.get_action_description(method, path)
-            if doc.get("status_code", 200) >= 400:
-                doc["action"] = f"FAILED: {doc['action']}"
-
-        if "timestamp" in doc and isinstance(doc["timestamp"], datetime):
-            doc["timestamp"] = doc["timestamp"].isoformat()
-        return doc
-
-    @staticmethod
-    async def create_log(log: ActivityLog):
-        await activity_logs_col.insert_one(log.dict())
-
-    @staticmethod
-    def list_logs(page: int = 1, size: int = 50, user_role: Optional[str] = None):
+    def list_feedback(page: int = 1, size: int = 20, role: Optional[str] = None, search: Optional[str] = None) -> dict:
+        items = []
+        total = 0
         skip = (page - 1) * size
-        query = {}
-        if user_role:
-            query["user_role"] = user_role
-        
-        cursor = activity_logs_col_sync.find(query).sort("timestamp", -1).skip(skip).limit(size)
-        total = activity_logs_col_sync.count_documents(query)
-        
+
+        targets = []
+        if not role or role == "vendor":
+            targets.append(("vendor", vendor_feedback_col_sync))
+        if not role or role == "client":
+            targets.append(("client", client_feedback_col_sync))
+
+        for r, col in targets:
+            query = {}
+            if search:
+                query["$or"] = [
+                    {"comments": {"$regex": search, "$options": "i"}},
+                    {"tracking_id": {"$regex": search, "$options": "i"}},
+                ]
+            
+            total += col.count_documents(query)
+            cursor = col.find(query).sort("created_at", -1)
+            for doc in cursor:
+                doc["role"] = r
+                items.append(SupportService._serialize(doc))
+
+        items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        paginated_items = items[skip : skip + size]
+
         return {
             "total": total,
             "page": page,
             "size": size,
-            "results": [LogService._serialize(d) for d in cursor]
+            "items": paginated_items
         }
+
+    @staticmethod
+    def get_feedback(role: str, feedback_id: str) -> dict:
+        from bson import ObjectId as BsonObjectId
+        col = vendor_feedback_col_sync if role == "vendor" else client_feedback_col_sync
+        try:
+            oid = BsonObjectId(feedback_id)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid ID")
+        
+        doc = col.find_one({"_id": oid})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Feedback not found")
+        
+        doc["role"] = role
+        return SupportService._serialize(doc)
+

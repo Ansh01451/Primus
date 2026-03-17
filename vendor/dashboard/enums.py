@@ -11,19 +11,17 @@ class POStatus(str, Enum):
     RELEASED = "Released"
     PENDING_APPROVAL = "Pending Approval"
     CANCELLED = "Cancelled"
-    COMPLETED = "Completed"
-    OTHER = "Other"
 
 @unique
 class VendorPostingGroup(str, Enum):
     DOMESTIC = "DOMESTIC"
     EU = "EU"
     FOREIGN = "FOREIGN"
-    CONSULTANT = "CONSULTANT"
-    UNKNOWN = "UNKNOWN"
+
 
 @unique
 class InvoiceStatus(str, Enum):
     COMPLETED = "completed"
     PENDING = "pending"
     OVERDUE = "overdue"
+

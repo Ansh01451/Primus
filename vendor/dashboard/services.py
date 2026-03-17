@@ -1,6 +1,5 @@
 # projects/services.py
 import logging
-from io import BytesIO
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 from fastapi import HTTPException, status, Depends
@@ -10,9 +9,6 @@ from dynamics.services import get_access_token, fetch_dynamics
 from .enums import POStatus, VendorPostingGroup, InvoiceStatus
 from typing import Any
 from .db import registered_vendor_col
-from .models import VendorInvoiceCreate, VendorInvoiceSubmitted
-from utils.blob_utils import upload_blob_from_file
-import uuid
 
 
 logger = logging.getLogger("projects.service")
@@ -49,8 +45,6 @@ def normalize_posting_group(raw: Any) -> VendorPostingGroup:
         return VendorPostingGroup.EU
     if s == "FOREIGN":
         return VendorPostingGroup.FOREIGN
-    if s == "CONSULTANT":
-        return VendorPostingGroup.CONSULTANT
     return VendorPostingGroup.UNKNOWN
 
 
@@ -471,60 +465,3 @@ async def get_invoice_items_and_aggregates(document_no: str, vendor_email: Optio
 
 
 
-
-async def create_submitted_invoice(data: VendorInvoiceCreate, file_content: Optional[BytesIO] = None, filename: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Submits a new invoice manually from a vendor.
-    Pushes metadata into 'manual_invoices' array in registered_vendors collection.
-    """
-    tracking_id = str(uuid.uuid4())
-    blob_url = None
-
-    if file_content and filename:
-        try:
-            blob_name = f"invoices/{tracking_id}/{filename}"
-            blob_url = upload_blob_from_file(blob_name, file_content)
-        except Exception as e:
-            logger.error(f"Failed to upload invoice PDF for tracking_id {tracking_id}: {e}")
-            raise HTTPException(status_code=500, detail="Failed to upload invoice PDF")
-
-    invoice_doc = data.dict()
-    invoice_doc["tracking_id"] = tracking_id
-    invoice_doc["invoice_pdf_url"] = blob_url
-    invoice_doc["submitted_at"] = datetime.now()
-    invoice_doc["status"] = "submitted"
-
-    try:
-        # Push into the vendor's document
-        result = await registered_vendor_col.update_one(
-            {"vendor_email": data.vendor_email},
-            {"$push": {"manual_invoices": invoice_doc}}
-        )
-        
-        if result.matched_count == 0:
-            raise HTTPException(status_code=404, detail="Vendor not found in registered_vendors")
-            
-        return invoice_doc
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception(f"Failed to push manual invoice for vendor {data.vendor_email}")
-        raise HTTPException(status_code=500, detail="Failed to save invoice to vendor profile")
-
-async def list_vendor_submitted_invoices(vendor_email: str) -> List[Dict[str, Any]]:
-    """
-    Lists all manually submitted invoices stored in the vendor's document.
-    """
-    vendor = await registered_vendor_col.find_one({"vendor_email": vendor_email}, {"manual_invoices": 1})
-    if not vendor or "manual_invoices" not in vendor:
-        return []
-    
-    invoices = vendor["manual_invoices"]
-    # Normalize dates for JSON compatibility
-    for inv in invoices:
-        if isinstance(inv.get("submitted_at"), datetime):
-            inv["submitted_at"] = inv["submitted_at"].isoformat()
-            
-    # Sort by date descending
-    invoices.sort(key=lambda x: x.get("submitted_at", ""), reverse=True)
-    return invoices

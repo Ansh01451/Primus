@@ -23,16 +23,16 @@ def upload_blob_from_file(file_name: str, file_content: BytesIO):
     
     except ResourceNotFoundError as e:
         # Raised if the specified container does not exist
-        logger(str(e), "upload_blob_from_file", {"file_name": file_name}, status_code=404)
+        logger.error(str(e), extra={"file_name": file_name, "status_code": 404})
         raise HTTPException(status_code=404, detail=f"Container '{container_name}' not found. Error: '{str(e)}'")
     
     except AzureError as storage_error:
         # Handle storage-specific errors
-        logger(str(storage_error), "upload_blob_from_file", {"file_name": file_name}, status_code=400)
+        logger.error(str(storage_error), extra={"file_name": file_name, "status_code": 400})
         raise HTTPException(status_code=400, detail=f"Blob storage error while uploading '{file_name}': {str(storage_error)}")
     
     except Exception as e:
         # Catch any unexpected errors
-        logger(str(e), "upload_blob_from_file", {"file_name": file_name}, status_code=500)
+        logger.error(str(e), extra={"file_name": file_name, "status_code": 500})
         raise HTTPException(status_code=500, detail=f"Unexpected error while uploading '{file_name}': {str(e)}")
 

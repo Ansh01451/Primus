@@ -63,6 +63,18 @@ class MeetingCreate(BaseModel):
     startDateTime: str              # ISO-8601, e.g. "2025-09-23T10:00:00Z"
     endDateTime: str                # ISO-8601
     attendees: Optional[List[str]] = None  # list of email addresses (optional)
+    enforce_availability: Optional[bool] = False # If true, checks if all attendees are free before scheduling
+
+class DateTimeTimeZone(BaseModel):
+    dateTime: str
+    timeZone: str = "UTC"
+
+class ScheduleRequest(BaseModel):
+    user_id: str                    # User context to execute the query 
+    schedules: List[str]            # List of emails/UPNs (e.g. project managers)
+    startTime: DateTimeTimeZone
+    endTime: DateTimeTimeZone
+    availabilityViewInterval: Optional[int] = 30 # minutes
 
 # --------- Routes
 
@@ -142,6 +154,41 @@ async def create_online_meeting(req: MeetingCreate):
     token_resp = await get_app_token(client_id, client_secret, tenant_id)
     token = token_resp["access_token"]
 
+    # Check availability if requested
+    if req.enforce_availability and req.attendees:
+        users_to_check = [req.user_id] + req.attendees
+        schedule_url = f"{GRAPH_BASE}/users/{req.user_id}/calendar/getSchedule"
+        schedule_body = {
+            "schedules": users_to_check,
+            "startTime": {
+                "dateTime": req.startDateTime,
+                "timeZone": "UTC"
+            },
+            "endTime": {
+                "dateTime": req.endDateTime,
+                "timeZone": "UTC"
+            },
+            "availabilityViewInterval": 30
+        }
+        
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            schedule_r = await client.post(schedule_url, headers=headers, json=schedule_body)
+            
+        if schedule_r.status_code == 200:
+            schedule_data = schedule_r.json()
+            for schedule in schedule_data.get("value", []):
+                items = schedule.get("scheduleItems", [])
+                for item in items:
+                    if item.get("status") in ["busy", "oof"]:
+                        raise HTTPException(
+                            status_code=409, 
+                            detail=f"User {schedule.get('scheduleId')} is busy during this time. Please check available slots first."
+                        )
+        else:
+            # If getSchedule fails, we might just log it or raise an error. Here we raise it.
+            raise HTTPException(status_code=schedule_r.status_code, detail=f"Failed to check availability: {schedule_r.text}")
+
     # Build request body
     body = {
         "startDateTime": req.startDateTime,
@@ -176,4 +223,43 @@ async def create_online_meeting(req: MeetingCreate):
         # 403 likely means permission or application access policy not configured
         raise HTTPException(status_code=r.status_code, detail=f"graph error: {r.text}")
 
+    return r.json()
+
+@app.post("/meetings/free-slots")
+async def get_free_slots(req: ScheduleRequest):
+    """
+    Check the free/busy schedule slots of given users (e.g. project managers).
+    Allows the user to see free slots before scheduling a meeting.
+    """
+    client_id = CLIENT_ID
+    client_secret = CLIENT_SECRET
+    tenant_id = TENANT_ID
+    if not (client_id and client_secret and tenant_id):
+        raise HTTPException(status_code=400, detail="client_id, client_secret and tenant_id required (env or params)")
+
+    token_resp = await get_app_token(client_id, client_secret, tenant_id)
+    token = token_resp["access_token"]
+
+    url = f"{GRAPH_BASE}/users/{req.user_id}/calendar/getSchedule"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    
+    body = {
+        "schedules": req.schedules,
+        "startTime": {
+            "dateTime": req.startTime.dateTime,
+            "timeZone": req.startTime.timeZone
+        },
+        "endTime": {
+            "dateTime": req.endTime.dateTime,
+            "timeZone": req.endTime.timeZone
+        },
+        "availabilityViewInterval": req.availabilityViewInterval
+    }
+
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(url, headers=headers, json=body)
+        
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=f"graph error: {r.text}")
+        
     return r.json()

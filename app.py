@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI
+from fastapi.openapi.utils import get_openapi
 from auth.middleware import JWTMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,8 +14,7 @@ from vendor.routes import router as vendor_router
 from publications.routes import router as primus_router
 from publications.services import load_data  # for scheduler prewarm/refresh
 from notifications.routes import router as notifications_router
-from surveys.routes import router as surveys_router
-from utils.activity_middleware import ActivityLoggerMiddleware
+from meetings.routes import router as meetings_router
 
 from admin.routes import AdminService
 
@@ -63,7 +63,54 @@ async def lifespan(app: FastAPI):
     print("[Lifespan] Scheduler shut down")
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(ActivityLoggerMiddleware)
+
+def custom_openapi():
+    print("--- [DEBUG] custom_openapi is being called! ---")
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="Primus Partners Portal API",
+        version="1.0.0",
+        description="Core API for Dynamics-linked portal",
+        routes=app.routes,
+    )
+    # Patch for Swagger UI 5.x picker compatibility (FastAPI 0.129+)
+    # It replaces 'contentMediaType: application/octet-stream' with 'format: binary'
+    
+    def patch_schema(s):
+        if not isinstance(s, dict):
+            return
+        if s.get("type") == "string" and s.get("contentMediaType") == "application/octet-stream":
+            s.pop("contentMediaType", None)
+            s["format"] = "binary"
+        elif s.get("type") == "array":
+            items = s.get("items", {})
+            if items.get("type") == "string" and items.get("contentMediaType") == "application/octet-stream":
+                items.pop("contentMediaType", None)
+                items["format"] = "binary"
+        
+        # Recurse into properties if object
+        if s.get("type") == "object":
+            for prop in s.get("properties", {}).values():
+                patch_schema(prop)
+        
+    # Patch components/schemas
+    for schema in openapi_schema.get("components", {}).get("schemas", {}).values():
+        patch_schema(schema)
+
+    # Patch paths
+    for path in openapi_schema.get("paths", {}).values():
+        for method_data in path.values():
+            content = method_data.get("requestBody", {}).get("content", {})
+            for media_type in content.values():
+                schema = media_type.get("schema", {})
+                patch_schema(schema)
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
 
 # ✅ Add CORS middleware
 app.add_middleware(
@@ -87,5 +134,5 @@ app.include_router(client_router)
 app.include_router(vendor_router)
 app.include_router(primus_router)
 app.include_router(notifications_router)
-app.include_router(surveys_router)
+app.include_router(meetings_router)
 # app.include_router(alumni_router)

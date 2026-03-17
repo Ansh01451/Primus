@@ -36,15 +36,35 @@ class EscalationService:
                 raise HTTPException(status_code=404, detail="Project not found")
             
             # Fetch client record
-            client_email = user.get("email")  # NEW: fetched from request state
-            if not client_email:
-                logger.error(f"Missing client_email in user context for client_email={client_email}")
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Client email missing")
+            # Token might have email in different fields depending on the provider/setup
+            client_email = user.get("email") or user.get("upn") or user.get("unique_name") or user.get("user_email")
             
-            client = registered_clients_col.find_one({"project_id": data.project_id, "client_email": client_email})
+            if not client_email:
+                logger.error(f"Missing client_email in user context. Keys available: {list(user.keys())}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, 
+                    detail=f"Client email missing. please ensure your token contains an email claim. keys: {list(user.keys())}"
+                )
+            
+            # Robust lookup: handle project_id as string or list, and case-insensitive email
+            # MongoDB's implicit array match works for both: {"field": "val"} matches "val" or ["other", "val"]
+            clean_project_id = data.project_id.strip()
+            query = {
+                "client_email": {"$regex": f"^{client_email}$", "$options": "i"},
+                "project_id": clean_project_id
+            }
+            client = registered_clients_col.find_one(query)
+            
             if not client:
-                logger.error(f"Client not found for project_id={data.project_id} and client_email={client_email}")
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+                logger.error(f"Client not found. Query used: {query}")
+                # Log some similar records to help debug
+                sample = registered_clients_col.find_one({"client_email": {"$regex": f"^{client_email}$", "$options": "i"}})
+                if sample:
+                    logger.info(f"Found client record but project_id mismatch. Registered projects: {sample.get('project_id')}. Requested: {clean_project_id}")
+                else:
+                    logger.info(f"No client record found for email: {client_email}")
+                
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Client not found for email {client_email} and project {clean_project_id}")
 
             # Generate tracking ID and timestamp
             tracking_id = str(uuid.uuid4())
@@ -155,20 +175,32 @@ class EscalationService:
     @staticmethod
     async def list_escalations_for_client(
         user: dict, 
-        project_no: str,
+        project_no: Optional[str],
         BACKEND_TO_FRONTEND_TYPE: dict[str, str]
     ) -> List[EscalationOut]:
         try:
-            client_email = user.get("email")
+            client_email = user.get("email") or user.get("upn") or user.get("unique_name") or user.get("user_email")
+            
+            # --- INTENSIVE DEBUG LOGGING ---
+            total_in_db = escalations_col.count_documents({})
+            print(f"[DEBUG list_escalations_for_client] TOTAL documents in client_escalations={total_in_db}")
+            print(f"[DEBUG list_escalations_for_client] user_dict={user}")
+            print(f"[DEBUG list_escalations_for_client] user_email_from_token={client_email}, project_no={project_no}")
+
             if not client_email:
                 raise HTTPException(status_code=400, detail="Client email missing in token")
 
-            # Filter by client_email + project_no
-            query = {"client_email": client_email}
-            if project_no:
+            # Filter by client_email (case-insensitive regex for robustness)
+            query = {"client_email": {"$regex": f"^{client_email}$", "$options": "i"}}
+            # Only add project_id to query if it's provided and not "all"
+            if project_no and project_no.lower() != "all":
                 query["project_id"] = project_no
 
+            print(f"[DEBUG list_escalations_for_client] FINAL query={query}")
             escalations = list(escalations_col.find(query))
+            print(f"[DEBUG list_escalations_for_client] found {len(escalations)} raw results from Mongo matching query")
+            # --- END INTENSIVE DEBUG LOGGING ---
+
             for esc in escalations:
                 esc["_id"] = str(esc["_id"])  # Convert ObjectId to string
                 esc["short_id"] = esc.get("short_id", "")
